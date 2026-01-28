@@ -8,6 +8,12 @@ This implementation enhances dark or low-light images by learning pixel-wise cur
 
 Based on the paper: **"Zero-Reference Deep Curve Estimation for Low-Light Image Enhancement"** by Guo, Li et al. ([arXiv:2001.06826](https://arxiv.org/abs/2001.06826)), though this implementation does add some more explicit control of the target brightness based on the `gain` parameter (see below).
 
+### Zero-DCE Example
+
+| Before | After |
+|--------|-------|
+| ![Before](before.jpg) | ![After](after.jpg) |
+
 ## Installation
 
 Install the required Python packages:

@@ -89,7 +89,7 @@ class ZeroDCE:
         """
         return self.network.run_inference(image, overlap_pixels, show_progress)
 
-    def _enhance_image(self, image: np.ndarray, output_params: np.ndarray) -> np.ndarray:
+    def _finish_image(self, image: np.ndarray, output_params: np.ndarray) -> np.ndarray:
         """Apply the predicted curve parameters to enhance the image.
 
         This method applies 8 iterations of pixel-wise curve adjustments using
@@ -163,4 +163,4 @@ class ZeroDCE:
         """
         image = self._prepare_image(image, gain, local_strength)
         output_params = self._run_network(image, overlap_pixels, show_progress)
-        return self._enhance_image(image, output_params)
+        return self._finish_image(image, output_params)

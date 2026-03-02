@@ -20,26 +20,44 @@ class Network:
 
     def __init__(
             self, model_path: str,
-            patch_size: tuple[int, int] = (256, 256),
+            patch_size: tuple[int, int] | None = (256, 256),
             batch_size: int = 1,
-            num_threads: int = 4
+            num_threads: int = 4,
+            channel_first: bool = False,
             ) -> None:
         """
         Initialize the Network object by loading the TFLite model.
 
         Args:
             model_path (str): Path to the TFLite model file
-            patch_size (tuple[int, int]): Size of the patches to process (height, width)
+            patch_size (tuple[int, int] | None): Size of the patches to process (height, width).
+                If None, taken from the model's input tensor shape.
             batch_size (int): Number of patches to process in each batch
             num_threads (int): Number of threads to use for inference
+            channel_first (bool): If True, the network expects input/output layout (B, C, H, W);
+                if False, layout is (B, H, W, C). Default False.
         """
         if not model_path.endswith(".tflite"):
             raise ValueError("Model path must end with .tflite")
+        self.channel_first = channel_first
         self.interpreter = Interpreter(model_path, num_threads=num_threads)
-        input_shape = self.interpreter.get_input_details()[0]['shape']
+        input_shape = list(self.interpreter.get_input_details()[0]['shape'])
+        if patch_size is None:
+            if channel_first:
+                # Shape is [B, C, H, W]
+                patch_size = (input_shape[2], input_shape[3])
+            else:
+                # Shape is [B, H, W, C]
+                patch_size = (input_shape[1], input_shape[2])
         input_shape[0] = batch_size
-        input_shape[1] = patch_size[0]
-        input_shape[2] = patch_size[1]
+        if channel_first:
+            # Shape is [B, C, H, W]
+            input_shape[2] = patch_size[0]
+            input_shape[3] = patch_size[1]
+        else:
+            # Shape is [B, H, W, C]
+            input_shape[1] = patch_size[0]
+            input_shape[2] = patch_size[1]
         self.interpreter.resize_tensor_input(0, input_shape)
         self.interpreter.allocate_tensors()
         self.patch_size = patch_size
@@ -206,12 +224,12 @@ class Network:
         Process patches through the TFLite interpreter.
 
         Args:
-            patches: Array of patches to process, shape (batch_size, patch_size_h, patch_size_w, channels)
+            patches: List of patches; each (patch_size_h, patch_size_w, channels). When channel_first,
+                patches are still (H, W, C) and are transposed to (B, C, H, W) before inference.
             show_progress: Whether to show a progress bar (default: False)
             batch_size: Number of patches to process in each batch (default: 1)
         Returns:
-            List of processed patches with same shape as input, except the number of channels may differ
-            depending on the network.
+            List of processed patches, each (patch_size_h, patch_size_w, channels).
         """
         # Get input and output tensors
         input_details = self.interpreter.get_input_details()
@@ -226,13 +244,17 @@ class Network:
 
         # Create progress bar if requested
         if show_progress:
-            pbar = tqdm(total=total_patches, desc="Denoising patches")
+            pbar = tqdm(total=total_patches, desc="Enhancing patches")
 
         # Process patches in batches
         for i in range(0, total_patches, batch_size):
             end_idx = min(i + batch_size, total_patches)
             batch = np.array(patches[i:end_idx])
             current_batch_size = end_idx - i
+
+            # Transpose (B, H, W, C) -> (B, C, H, W) if network expects channel_first
+            if self.channel_first:
+                batch = np.transpose(batch, (0, 3, 1, 2))
 
             # Scale input for INT8 models
             if is_quantized:
@@ -242,22 +264,26 @@ class Network:
 
             # The final batch may need padding to reach the batch size.
             if total_patches - i < batch_size:
-                batch = np.concatenate([batch, np.zeros((batch_size - (total_patches - i), *batch.shape[1:]))],
-                    axis=0, dtype=np.float32)
+                batch = np.concatenate([batch, np.zeros((batch_size - (total_patches - i), *batch.shape[1:]), dtype=batch.dtype)],
+                    axis=0)
             self.interpreter.set_tensor(input_details[0]['index'], batch)
             self.interpreter.invoke()
             output = self.interpreter.get_tensor(output_details[0]['index'])
             # If the final batch was padded, then the outputs need trimming back.
             if total_patches - i < batch_size:
-                output = output[:total_patches - i]
-            output = list(output)
+                output = output[: total_patches - i]
 
             # De-scale output for INT8 models
             if is_quantized:
                 output_scale = output_details[0]['quantization'][0]
                 output_zero_point = output_details[0]['quantization'][1]
-                output = list((np.array(output).astype(np.float32) - output_zero_point) * output_scale)
+                output = (output.astype(np.float32) - output_zero_point) * output_scale
 
+            # Transpose (B, C, H, W) -> (B, H, W, C) if network used channel_first
+            if self.channel_first:
+                output = np.transpose(output, (0, 2, 3, 1))
+
+            output = list(output)
             processed_patches += output
 
             # Update progress bar
@@ -292,7 +318,12 @@ class Network:
         # Run the patches through the neural network model.
         outputs = self._process_patches(patches, show_progress, self.batch_size) # This is the slow part.
         # Reassemble the patches to make the output image.
-        output_shape = list(image.shape)
-        output_shape[-1] = self.interpreter.get_output_details()[0]['shape'][-1]
+        output_details = self.interpreter.get_output_details()[0]['shape']
+        if self.channel_first:
+            # Output tensor is [B, C, H, W]; image is (H, W, C)
+            output_shape = (image.shape[0], image.shape[1], output_details[1])
+        else:
+            # Output tensor is [B, H, W, C]
+            output_shape = (image.shape[0], image.shape[1], output_details[-1])
         output_image = self._reassemble_patches(output_shape, overlap_pixels, patch_info, outputs)
         return output_image
